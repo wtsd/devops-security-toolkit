@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+
+# Read more about rootkit hunting: https://rkhunter.sourceforge.net/
+
 set -euo pipefail
 
 if [[ "${AUTH_OK:-}" != "1" ]]; then
@@ -147,18 +150,91 @@ echo "[*] Writing: $REPORT"
   echo
  
 
-
-  echo -e "\n== SSH authorized_keys with commands/agents =="
+  # SSH
+  echo "== SSH authorized_keys with options =="
   while IFS= read -r f; do
     echo "-- $f"
-    grep -nE 'command=|from=' "$f" || true
+    grep -nE '^(command=|from=|environment=|permitopen=|tunnel=|agent-forwarding|port-forwarding)' "$f" || echo "(no options)"
+  
+    # permissions
+    perms="$(stat -c '%A %U:%G' "$f" 2>/dev/null || true)"
+    echo "   perms: $perms"
   done < <(find /home /root -maxdepth 3 -name authorized_keys 2>/dev/null)
+  echo
 
-  echo -e "\n== Recent /tmp executables =="
-  find /tmp -type f -executable -mtime -7 -printf "%TY-%Tm-%Td %TH:%TM %p\n" 2>/dev/null || true
+  echo "== SSHD config deltas =="
+  if [[ -f /etc/ssh/sshd_config ]]; then
+    # Make sure nothing is enabled in sshd
+    #egrep -i '^(PermitRootLogin|PasswordAuthentication|AuthorizedKeysCommand|[A-Za-z+]Root[A-Za-z+])\b' /etc/ssh/sshd_config || true 
+    egrep -i '^(PermitRootLogin|PasswordAuthentication|AuthorizedKeysCommand|AllowUsers|AllowGroups|GatewayPorts|PermitTunnel)\b' /etc/ssh/sshd_config || true
+  fi
+  echo
 
-  echo -e "\n== Systemd user services and suspicious names =="
-  systemctl list-units --type=service --all 2>/dev/null | grep -Ei "reverse|shell|nc|socat|backdoor" || true
+
+  # Shell startup files
+  echo "== Shells (curls, nc, reverse shells) =="
+  GREP='(curl|wget).*(sh|bash)|bash -i|nc -e|socat|mkfifo .* /dev/tcp|/dev/tcp/'
+  while IFS= read -r f; do
+    echo "-- $f"
+    grep -nE "$GREP" "$f" || echo "(clean)"
+
+  done < <(find /etc/profile.d -type f -maxdepth 1 2>/dev/null; \
+    find /root /home -maxdepth 2 -type f \( -name ".bashrc" -o \
+    -name ".bash_profile" -o -name ".profile" \) 2>/dev/null)
+  echo
+
+
+  # /tmp, /var/tmp
+  echo "== Recent executables in /tmp and /var/tmp (last 7 days) =="
+  for d in /tmp /var/tmp; do
+    echo "-- $d"
+    find "$d" -xdev -type f -mtime -7 \( -executable -o -name '*.so' -o -name '*.bin' \) -printf "%TY-%Tm-%Td %TH:%TM %M %u:%g %p\n" 2>/dev/null || true
+  done
+  echo
+
+
+
+  # ld.so.preload
+  # Read more: https://www.defensive-security.com/blog/preventing-modification-of-etcldsopreload-with-selinux
+  echo "== /etc/ld.so.preload (if present) =="
+  if [[ -s /etc/ld.so.preload ]]; then
+    cat /etc/ld.so.preload
+    echo "[!] WARNING: ld.so.preload in use; ensure libraries are legitimate"
+  else
+    echo "(absent)"
+  fi
+  echo
+
+  
+  # sudoers:
+  echo "== Users with login shells (UID >= 1000) =="
+  awk -F: '($3>=1000)&&($7~/bash|zsh|sh/){print $1":"$3":"$6":"$7}' /etc/passwd || true
+  
+  echo "-- /etc/passwd mtime: $(stat -c %y /etc/passwd 2>/dev/null || echo n/a)"
+  echo "-- /etc/shadow mtime: $(stat -c %y /etc/shadow 2>/dev/null || echo n/a)"
+  
+  echo
+
+
+  # users and password changes
+  echo "== Users with login shells (UID >= 1000) =="
+  awk -F: '($3>=1000)&&($7~/bash|zsh|sh/){print $1":"$3":"$6":"$7}' /etc/passwd || true
+  
+  echo "-- /etc/passwd mtime: $(stat -c %y /etc/passwd 2>/dev/null || echo n/a)"
+  echo "-- /etc/shadow mtime: $(stat -c %y /etc/shadow 2>/dev/null || echo n/a)"
+  
+  echo
+
+  # Kernel modules
+  echo "== Kernel modules not under /lib/modules (if any) =="
+  if command -v lsmod >/dev/null 2>&1 && command -v modinfo >/dev/null 2>&1; then
+    while read -r m; do
+      p="$(modinfo -n "$m" 2>/dev/null || true)"
+    
+      [[ -n "$p" && "$p" != /lib/modules/* ]] && echo "$m -> $p"
+    
+    done < <(lsmod | awk 'NR>1{print $1}')
+  fi
 
 } | tee "$REPORT"
 
