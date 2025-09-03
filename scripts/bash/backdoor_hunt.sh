@@ -5,17 +5,43 @@ if [[ "${AUTH_OK:-}" != "1" ]]; then
   echo "Refusing to run without AUTH_OK=1 (authorization confirmation)."
   exit 1
 fi
+if [[ $EUID -ne 0 ]]; then
+  echo "Please run as root for complete results." >&2
+fi
+umask 077
+trap 'echo "[!] Aborted (signal)"; exit 2' INT TERM
+
+need() { command -v "$1" >/dev/null 2>&1 || echo "[!] Missing: $1"; }
+
+for c in ss awk sort grep find systemctl stat getcap sed cut xargs; do need "$c"; done
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
+HOST="$(hostname -f 2>/dev/null || hostname)"
+
 OUTDIR="results/reports"
 mkdir -p "$OUTDIR"
 
 REPORT="$OUTDIR/backdoor_detection_${TS}.txt"
+# For json formatted report:
+JSON="$OUTDIR/backdoor_detection_${TS}.json"
+BASE_SUID="${BASE_SUID:-results/baselines/suid.list}"
+
 echo "[*] Writing: $REPORT"
 
 {
-  echo "== Suspicious listening ports (non-standard) =="
-  ss -lntu | awk 'NR>1 {print $1,$5}' | sort -u
+  echo "== Host =="
+  echo "Host: $HOST"
+  echo "Date (UTC): $TS"
+  uname -a 2>/dev/null || true
+
+  echo 
+
+  # Sus software listening ports except the common ones
+  echo "== Suspicious listening ports (with processes) =="
+  COMMON=':22|:80|:443|:53|:25|:110|:143|:587|:993|:995|:3306|:5432|:6379|:27017|:3000|:5000|:8080|:8443'
+  if ss -lntup 2>/dev/null | tail -n +2 | awk '{print $1,$5,$7}' | grep -vE "$COMMON" | sort -u; then :; else echo "(none or ss unavailable)"; fi
+  echo
+
 
   echo -e "\n== Unowned files in PATH =="
   IFS=':' read -ra P <<< "$PATH"
@@ -47,5 +73,24 @@ echo "[*] Writing: $REPORT"
   systemctl list-units --type=service --all 2>/dev/null | grep -Ei "reverse|shell|nc|socat|backdoor" || true
 
 } | tee "$REPORT"
+
+# For json summary
+{
+  printf '{\n'
+  printf '  "hostname": %q,\n' "$HOST"
+  printf '  "timestamp_utc": %q,\n' "$TS"
+
+  # Count a few signals
+  suspicious_ports=$(ss -lntup 2>/dev/null | tail -n +2 | grep -vE "$COMMON" | wc -l || echo 0)
+  ww_dirs=$(find /etc /usr /var /opt -xdev -type d -perm -0002 2>/dev/null | wc -l || echo 0)
+  caps=$( (getcap -r / 2>/dev/null | wc -l) || echo 0 )
+  tmp_execs=$(find /tmp /var/tmp -xdev -type f -mtime -7 -executable 2>/dev/null | wc -l || echo 0)
+  printf '  "suspicious_listeners": %s,\n' "$suspicious_ports"
+  printf '  "world_writable_dirs": %s,\n' "$ww_dirs"
+  printf '  "files_with_capabilities": %s,\n' "$caps"
+  printf '  "recent_tmp_execs": %s\n' "$tmp_execs"
+  printf '}\n'
+} > "$JSON" 2>/dev/null || true
+
 
 echo "[*] Backdoor detection sweep complete."
