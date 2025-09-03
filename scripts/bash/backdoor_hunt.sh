@@ -102,11 +102,51 @@ echo "[*] Writing: $REPORT"
   echo
 
 
+  # JOBS:
 
-  echo -e "\n== Cron jobs =="
-  crontab -l 2>/dev/null || true
+  # Jobs: Cronjobs
+  echo "== Cron jobs =="
+  crontab -l 2>/dev/null || echo "(no user crontab)"
+
   ls -la /etc/cron* 2>/dev/null || true
 
+  for f in /etc/crontab /etc/cron.d/*; do [[ -e "$f" ]] && \
+    { echo "-- $f"; sed -n '1,200p' "$f"; echo; }; done
+  echo
+
+  # Jobs: at jobs
+  echo "== at jobs =="
+  (atq 2>/dev/null || echo "(no at)") && echo
+  echo
+
+  # Startup & daemons: systemd
+  # Startup & daemons: rc.local
+  echo "== Systemd services & timers (system) =="
+  systemctl list-units --type=service --all 2>/dev/null | awk 'NR==1 || /loaded/ {print}' || true
+  systemctl list-timers --all 2>/dev/null || true
+ 
+  echo "-- Suspicious names (reverse|shell|nc|socat|backdoor|tty|hidden)"
+  (systemctl list-units --type=service --all 2>/dev/null | grep -Ei "reverse|shell|nc|socat|backdoor|tty|hidden" || true)
+ 
+  echo "-- Unit file ExecStart for enabled services"
+  while IFS= read -r u; do
+    systemctl show "$u" -p FragmentPath,ExecStart 2>/dev/null | sed "s/^/[unit] $u /"
+  done < <(systemctl list-unit-files --type=service --state=enabled 2>/dev/null | awk 'NR>1{print $1}' | sed 's/@.*//g' | sort -u)
+  echo
+
+  # systemd (per user)
+  echo "== Systemd user services (per user) =="
+  while IFS=: read -r name _ uid gid home shell; do
+    [[ "$uid" -ge 1000 && -d "$home" ]] || continue
+    echo "-- user: $name ($uid) home: $home"
+
+    sudo -u "$name" XDG_RUNTIME_DIR=/run/user/"$uid" systemctl --user list-units --type=service --all 2>/dev/null || true
+    sudo -u "$name" XDG_RUNTIME_DIR=/run/user/"$uid" systemctl --user list-timers --all 2>/dev/null || true
+  done < /etc/passwd
+  echo
+ 
+
+ 
   echo -e "\n== SSH authorized_keys with commands/agents =="
   while IFS= read -r f; do
     echo "-- $f"
