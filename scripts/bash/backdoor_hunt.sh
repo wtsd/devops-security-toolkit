@@ -13,7 +13,10 @@ trap 'echo "[!] Aborted (signal)"; exit 2' INT TERM
 
 need() { command -v "$1" >/dev/null 2>&1 || echo "[!] Missing: $1"; }
 
+
 for c in ss awk sort grep find systemctl stat getcap sed cut xargs; do need "$c"; done
+
+###
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 HOST="$(hostname -f 2>/dev/null || hostname)"
@@ -26,8 +29,9 @@ REPORT="$OUTDIR/backdoor_detection_${TS}.txt"
 JSON="$OUTDIR/backdoor_detection_${TS}.json"
 BASE_SUID="${BASE_SUID:-results/baselines/suid.list}"
 
-echo "[*] Writing: $REPORT"
+###
 
+echo "[*] Writing: $REPORT"
 {
   echo "== Host =="
   echo "Host: $HOST"
@@ -43,18 +47,61 @@ echo "[*] Writing: $REPORT"
   echo
 
 
-  echo -e "\n== Unowned files in PATH =="
-  IFS=':' read -ra P <<< "$PATH"
+  # PATH hygiene
+  echo "== PATH hygiene (world/group writable dirs, non-root owners) =="
+  IFS=':' read -ra P <<< "${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+  
   for d in "${P[@]}"; do
     [[ -d "$d" ]] || continue
-    find "$d" -maxdepth 1 -type f -perm -4000 -printf "%m %u %g %p\n" 2>/dev/null || true
+  
+    perms="$(stat -c '%A %U:%G' "$d" 2>/dev/null || true)"
+    sticky="$(stat -c '%a' "$d" 2>/dev/null || echo '')"
+    printf "%s  %s\n" "$d" "$perms"
+
+    # flag if writable by group/other
+    if [[ -w "$d" && ( $(stat -c '%A' "$d") =~ .{7}w|.{8}w ) ]]; then
+      echo "  [!] Writable by non-owner"
+    fi
+
+    # sticky bit absence for world-writable dirs
+    if [[ "$sticky" =~ ^[0-7]??7$ ]] && [[ ! -k "$d" ]]; then
+      echo "  [!] World-writable without sticky bit"
+    fi
+  
+    # files in PATH not owned by root
+    find "$d" -maxdepth 1 -type f ! -user root -printf "  [!] Non-root file: %u:%g %m %p\n" 2>/dev/null || true
   done
+  echo
 
-  echo -e "\n== New/odd SUID files =="
-  find / -xdev -perm -4000 -type f -printf "%u %g %m %p\n" 2>/dev/null | sort || true
+  # SUID/SGID
+  echo "== SUID/SGID files (new/odd) =="
+  mapfile -t suids < <(find / -xdev \( -perm -4000 -o -perm -2000 \) -type f -printf "%u %g %m %p\n" 2>/dev/null | sort -u || true)
+  if [[ -s "$BASE_SUID" ]]; then
+    echo "-- Baseline diff vs $BASE_SUID"
+    # Normalize to path list for diff
+    printf "%s\n" "${suids[@]}" | awk '{print $NF}' | sort -u > /tmp/suid_now.$$ || true
+    comm -13 <(sort -u "$BASE_SUID") /tmp/suid_now.$$ | sed 's/^/[NEW] /' || true
+    rm -f /tmp/suid_now.$$
+  fi
+  printf "%s\n" "${suids[@]}"
+  echo
 
-  echo -e "\n== World-writable directories in sensitive paths =="
-  find /etc /usr /var /opt -xdev -type d -perm -0002 -printf "%m %p\n" 2>/dev/null || true
+  # Capabilities
+  echo "== Files with Linux capabilities =="
+  if command -v getcap >/dev/null 2>&1; then
+    getcap -r / 2>/dev/null | sed 's/^/[cap] /' || true
+  else
+    echo "(getcap not available)"
+  fi
+  echo
+
+
+  # World-writavle in sensitive paths
+  echo "== World-writable files/dirs in sensitive paths =="
+  find /etc /usr /var /opt -xdev \( -type d -o -type f \) -perm -0002 -printf "%m %p\n" 2>/dev/null || true
+  echo
+
+
 
   echo -e "\n== Cron jobs =="
   crontab -l 2>/dev/null || true
