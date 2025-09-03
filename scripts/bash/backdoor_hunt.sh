@@ -3,6 +3,7 @@ set -euo pipefail
 
 if [[ "${AUTH_OK:-}" != "1" ]]; then
   echo "Refusing to run without AUTH_OK=1 (authorization confirmation)."
+  echo "Usage: sudo AUTH_OK=1 ./backdoor_hunt.sh"
   exit 1
 fi
 if [[ $EUID -ne 0 ]]; then
@@ -146,7 +147,7 @@ echo "[*] Writing: $REPORT"
   echo
  
 
- 
+
   echo -e "\n== SSH authorized_keys with commands/agents =="
   while IFS= read -r f; do
     echo "-- $f"
